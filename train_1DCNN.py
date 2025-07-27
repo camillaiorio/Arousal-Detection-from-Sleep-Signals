@@ -4,13 +4,15 @@ from torch.utils.data import Dataset, DataLoader
 import glob
 import os
 import torch.nn.functional as F
+from tqdm import tqdm
 
 class ArousalDataset(Dataset):
-    def __init__(self, folder, window_size=600, step=600):
+    def __init__(self, folder, window_size=600, step=60):
         self.samples = []
         self.window_size = window_size
+        self.step = step
 
-        files = sorted(glob.glob(os.path.join(folder, "*_p_signal.npy")))[:1]
+        files = sorted(glob.glob(os.path.join(folder, "*_p_signal.npy")))[:50]
         for signal_file in files:
             base = signal_file.replace("_p_signal.npy", "")
             signal = np.load(base + "_p_signal.npy",mmap_mode='r')  # shape: (N, window, channels)
@@ -24,11 +26,13 @@ class ArousalDataset(Dataset):
 
             padding = np.zeros((self.window_size-1, f))
             signal = np.concatenate((padding, signal))
-            signal = torch.tensor(signal).unfold(0, self.window_size, 1).numpy()
+            signal = torch.tensor(signal).unfold(0, self.window_size, self.step).numpy()
 
             label = arousal.max(-1)
+            label = label[self.window_size - 1:]  # allineamento con padding
+            label = label[::self.step]  # downsampling come nelle 2D CNN
 
-            for s, l in zip(signal, label):
+            for s, l in zip(signal, label[::self.step]):
                 self.samples.append((s, l))
 
 
@@ -47,7 +51,7 @@ class ArousalDataset(Dataset):
 import torch.nn as nn
 import torch.nn.functional as F
 
-class ArousalCNN(nn.Module): #TODO aumentare la profondità
+class ArousalCNN(nn.Module):
     def __init__(self, input_channels):
         super(ArousalCNN, self).__init__()
         self.net = nn.Sequential(
@@ -88,15 +92,15 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3, device='cuda'):
         print(f"\n[INFO] === Inizio epoca {epoch + 1}/{epochs} ===")
         model.train()
         losses = []
-        for x, y in train_loader:
+        for x, y in tqdm(train_loader, desc=f"[Train Epoca {epoch+1}]"):
             x, y = x.to(device), y.to(device)
 
-            print(f"[TRAIN] Input shape: {x.shape}, Target shape: {y.shape}")
+            #print(f"[TRAIN] Input shape: {x.shape}, Target shape: {y.shape}")
             optimizer.zero_grad()
             pred = model(x)
-            print(f"[TRAIN] Output shape: {pred.shape}")
+            #print(f"[TRAIN] Output shape: {pred.shape}")
             loss = criterion(pred, y.long())
-            print(f"[TRAIN] Loss: {loss.item():.4f}")
+            #print(f"[TRAIN] Loss: {loss.item():.4f}")
             loss.backward()
             optimizer.step()
             losses.append(loss.item())
@@ -105,6 +109,9 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3, device='cuda'):
         print(f"[INFO] === Fine epoca {epoch + 1} - Loss medio: {mean_loss:.4f} ===")
         acc = evaluate(model, val_loader, device=device)
         print(f"[INFO] Accuracy su validation set: {acc:.4f}")
+
+        torch.save(model.state_dict(), f"model_1DCNN{epoch}.pt")
+        print(f"[INFO] Salvati i pesi in model_1DCNN{epoch}.pt")
 
 
 def evaluate(model, loader, device='cuda'):
@@ -131,7 +138,7 @@ if __name__ == '__main__':
     # Parametri
     batch_size = 32
     window_size = 600  # 60s * 10Hz
-    data_path = r'D:\TESI\records'
+    data_path = r'K:\TESI\records'
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -142,7 +149,6 @@ if __name__ == '__main__':
     sample_input, _ = dataset[0]
     input_channels = sample_input.shape[0]
     print(input_channels)
-    exit(1)
 
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
